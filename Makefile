@@ -32,10 +32,30 @@ a_law-swh.lv2 u_law-swh.lv2
 
 FFT_PLUGINS = mbeq-swh.lv2 pitch_scale-swh.lv2
 
+# blo.o (analogue_osc, fm_osc, hermes_filter) uses POSIX shm_open/mmap, and the
+# FFT plugins need fftw3; neither is available/portable for the bare-metal
+# PicoLV2 target, so they're left out of the PICOLV2 build for now.
+PICOLV2_EXCLUDE_PLUGINS = analogue_osc-swh.lv2 fm_osc-swh.lv2 hermes_filter-swh.lv2
+
+PICOLV2 ?= 0
 
 DARWIN := $(shell uname | grep Darwin)
 OS := $(shell uname -s)
 
+ifeq ($(PICOLV2),1)
+EXT = so
+CC = arm-none-eabi-gcc
+AR = arm-none-eabi-ar
+PLUGIN_CFLAGS = -mcpu=cortex-m33 -mthumb -mfloat-abi=hard -mfpu=fpv5-sp-d16 \
+	-Wall -I. -Iinclude -O2 -fomit-frame-pointer -fPIC -DPIC -DPICOLV2 \
+	-idirafter /usr/include $(CFLAGS)
+PLUGIN_LDFLAGS = -mcpu=cortex-m33 -mthumb -mfloat-abi=hard -mfpu=fpv5-sp-d16 \
+	-shared -nostdlib -Wl,-Bsymbolic -Wl,-z,undefs -Wl,-z,max-page-size=0x1000 \
+	-Wl,--no-warnings -Wl,-s picolv2-runtime.o \
+	-Wl,--start-group -lgcc -lc -lm -lnosys -Wl,--end-group $(LDFLAGS)
+BUILD_PLUGINS = $(filter-out $(PICOLV2_EXCLUDE_PLUGINS),$(PLUGINS))
+RT =
+else
 ifdef DARWIN
 EXT = dylib
 CC = clang
@@ -50,21 +70,39 @@ PLUGIN_LDFLAGS = -shared -lm $(LDFLAGS)
 BUILD_PLUGINS = $(PLUGINS) $(FFT_PLUGINS)
 RT = -lrt
 endif
+endif
 
 # Load plugin specific flags:
 include extra.mk
 
 OBJECTS = $(shell echo $(BUILD_PLUGINS) | sed 's/\([^ ]*\.lv2\)/plugins\/\1\/plugin.$(EXT)/g')
 
-all: util gverb $(OBJECTS)
+UTIL_OBJS = util/iir.o util/db.o util/rms.o
+ifneq ($(PICOLV2),1)
+UTIL_OBJS += util/blo.o util/pitchscale.o
+endif
+
+PICOLV2_RUNTIME_OBJ =
+ifeq ($(PICOLV2),1)
+PICOLV2_RUNTIME_OBJ = picolv2-runtime.o
+endif
+
+# Shared malloc/free/calloc/realloc-over-picolv2_alloc implementation, reused
+# from the picolv2 host repo rather than duplicated inside this fetched clone.
+PICO_ALLOC_SRC = $(CURDIR)/../../lib/picolv2lib.c
+
+all: util gverb $(PICOLV2_RUNTIME_OBJ) $(OBJECTS)
 
 gverb: gverb/gverb.c gverb/gverbdsp.c gverb/gverb.o gverb/gverbdsp.o
-	(cd gverb && make -w CFLAGS="$(PLUGIN_CFLAGS)" LDFLAGS="$(PLUGIN_LDFLAGS)")
+	(cd gverb && make -w CC="$(CC)" AR="$(AR)" CFLAGS="$(PLUGIN_CFLAGS)" LDFLAGS="$(PLUGIN_LDFLAGS)")
 
 util/pitchscale.o:
 	$(CC) $(PLUGIN_CFLAGS) $(fftw3_CFLAGS) $*.c -c -o $@
 
-util: util/blo.o util/iir.o util/db.o util/rms.o util/pitchscale.o
+util: $(UTIL_OBJS)
+
+picolv2-runtime.o: $(PICO_ALLOC_SRC)
+	$(CC) $(PLUGIN_CFLAGS) -c $< -o $@
 
 %.c: OBJ = $(shell echo $@ | sed 's/\.c$$/-@OS@.$(EXT)/')
 %.c: %.xml xslt/source.xsl xslt/manifest.xsl
@@ -79,18 +117,20 @@ util: util/blo.o util/iir.o util/db.o util/rms.o util/pitchscale.o
 	$(CC) $(PLUGIN_CFLAGS) $($(NAME)_CFLAGS) $*.c -c -o $@
 
 %.$(EXT): NAME = $(shell echo $@ | sed 's/plugins\/\(.*\)-swh.*/\1/')
-%.$(EXT): %.xml %.o %.ttl
-	$(CC) $*.o $(PLUGIN_LDFLAGS) $($(NAME)_LDFLAGS) -o $@
+%.$(EXT): %.xml %.o %.ttl $(PICOLV2_RUNTIME_OBJ)
+	$(CC) $*.o $($(NAME)_LDFLAGS) $(PLUGIN_LDFLAGS) -o $@
 	cp $@ $*-$(OS).$(EXT)
 	sed 's/@OS@/$(OS)/g' < `dirname $@`/manifest.ttl.in > `dirname $@`/manifest.ttl
 
 clean: dist-clean
 
+# NB: rm's {a,b} brace expansion is a bashism and silently does nothing under
+# the default /bin/sh (dash), so each suffix is globbed separately here.
 dist-clean:
-	rm -f plugins/*/*.{$(EXT),o} plugins/*/*.o plugins/*/manifest.ttl util/*.o gverb/*.o
+	rm -f plugins/*/*.$(EXT) plugins/*/*.o plugins/*/manifest.ttl util/*.o gverb/*.o picolv2-runtime.o
 
 real-clean:
-	rm -f plugins/*/*.{c,ttl,$(EXT),o,in} util/*.o gverb/*.o
+	rm -f plugins/*/*.c plugins/*/*.ttl plugins/*/*.in plugins/*/*.$(EXT) plugins/*/*.o util/*.o gverb/*.o picolv2-runtime.o
 
 install:
 	@echo 'use install-user to install in home or install-system to install system wide'
