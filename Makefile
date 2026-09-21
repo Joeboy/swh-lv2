@@ -89,7 +89,7 @@ endif
 
 # Shared malloc/free/calloc/realloc-over-picolv2_alloc implementation, reused
 # from the picolv2 host repo rather than duplicated inside this fetched clone.
-PICO_ALLOC_SRC = $(CURDIR)/../../lib/picolv2lib.c
+PICO_ALLOC_SRC = $(CURDIR)/../../sdk/src/runtime.c
 
 all: util gverb $(PICOLV2_RUNTIME_OBJ) $(OBJECTS)
 
